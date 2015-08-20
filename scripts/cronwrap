@@ -35,6 +35,8 @@ import argparse
 import tempfile
 import time
 import platform
+import subprocess
+import threading
 from datetime import datetime, timedelta
 
 
@@ -48,11 +50,11 @@ def handle_args(sys_args):
         sys_args.verbose = True
 
     if sys_args.cmd:
-        cmd = Command(sys_args.cmd)
-        if cmd.returncode != 0:
-            handle_error(sys_args, cmd)
-        elif is_time_exceeded(sys_args, cmd):
+        cmd = Command(sys_args.cmd, sys_args.time)
+        if cmd.returncode == 500:
             handle_timeout(sys_args, cmd)
+        elif cmd.returncode != 0:
+            handle_error(sys_args, cmd)
         else:
             handle_success(sys_args, cmd)
     elif sys_args.emails:
@@ -171,14 +173,36 @@ class Command:
            print cmd.returncode
            print cmd.run_time
     """
-    def __init__(self, command):
+    def __init__(self, command, max_time='1h'):
         outfile = tempfile.mktemp()
         errfile = tempfile.mktemp()
 
         t_start = time.time()
 
-        self.returncode = os.system("( %s ) > %s 2> %s" %
-                                    (command, outfile, errfile)) >> 8
+        def target():
+            self.process = subprocess.Popen("( %s ) > %s 2> %s" % (command, outfile, errfile), shell=True)
+            self.process.communicate()
+
+        thread = threading.Thread(target=target)
+        thread.start()
+
+        #Parse sys_args.time
+        sp = re.match("(\d+)([hms])", max_time).groups()
+        t_val, t_unit = int(sp[0]), sp[1]
+
+        #Convert time to seconds
+        if t_unit == 'h':
+            t_val = t_val * 60 * 60
+        elif t_unit == 'm':
+            t_val = t_val * 60
+
+        thread.join(t_val)
+        if thread.is_alive():
+            # Timeout
+            self.returncode = 500
+        else:
+            self.returncode = self.process.returncode
+
         self.run_time = time.time() - t_start
         self.stdout = open(outfile, "r").read().strip()
         self.stderr = open(errfile, "r").read().strip()
@@ -212,25 +236,6 @@ def send_email(sys_args, emails, subject, message):
                     print trim_if_needed(cmd.stderr)
     finally:
         os.remove(err_report)
-
-
-def is_time_exceeded(sys_args, cmd):
-    """Returns `True` if the command's run time has exceeded the maximum
-    run time specified in command arguments. Else `False  is returned."""
-    cmd_time = int(cmd.run_time)
-
-    #Parse sys_args.time
-    max_time = sys_args.time
-    sp = re.match("(\d+)([hms])", max_time).groups()
-    t_val, t_unit = int(sp[0]), sp[1]
-
-    #Convert time to seconds
-    if t_unit == 'h':
-        t_val = t_val * 60 * 60
-    elif t_unit == 'm':
-        t_val = t_val * 60
-
-    return cmd_time > t_val
 
 
 def trim_if_needed(txt, max_length=10000):
